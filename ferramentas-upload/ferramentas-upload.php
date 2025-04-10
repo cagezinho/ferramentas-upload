@@ -3,7 +3,7 @@
  * Plugin Name:       Ferramentas Upload
  * Plugin URI:        https://github.com/cagezinho/ferramentas-upload
  * Description:       Permite atualizações massivas via CSV: Texto Alternativo (Alt Text) de Imagens e SERPs utilizando o Yoast.
- * Version:           1.0.1
+ * Version:           1.0.2
  * Author:            Cage
  * Author URI:        https://github.com/cagezinho
  * License:           GPL v2 or later
@@ -79,6 +79,7 @@ function fu_render_admin_page() {
                  <p><?php esc_html_e('Faça o upload de um arquivo CSV para atualizar o texto alternativo das imagens em massa.', FU_TEXT_DOMAIN); ?></p>
                  <p><?php esc_html_e('O CSV deve ter duas colunas: ', FU_TEXT_DOMAIN); ?><strong><?php esc_html_e('Image URL', FU_TEXT_DOMAIN); ?></strong> <?php esc_html_e('e', FU_TEXT_DOMAIN); ?> <strong><?php esc_html_e('Alt Text', FU_TEXT_DOMAIN); ?></strong>. <?php esc_html_e('A primeira linha (cabeçalho) será ignorada.', FU_TEXT_DOMAIN); ?></p>
                  <p><strong><?php esc_html_e('Importante:', FU_TEXT_DOMAIN); ?></strong> <?php esc_html_e('Use a URL completa da imagem como ela aparece na Biblioteca de Mídia.', FU_TEXT_DOMAIN); ?></p>
+                 <p><?php esc_html_e('Este processo irá atualizar o texto alt da imagem e também em todos os posts/páginas onde a imagem é usada.', FU_TEXT_DOMAIN); ?></p>
 
                  <form method="post" enctype="multipart/form-data">
                      <input type="hidden" name="<?php echo esc_attr(FU_PREFIX . 'action'); ?>" value="update_alt_text">
@@ -172,6 +173,7 @@ function fu_handle_alt_text_upload() {
     $updated_count = 0;
     $skipped_count = 0;
     $not_found_count = 0;
+    $posts_updated = 0;
     $errors = [];
     $row_number = 0;
 
@@ -215,8 +217,13 @@ function fu_handle_alt_text_upload() {
 
             if ($attachment_id) {
                 if (get_post_type($attachment_id) === 'attachment') {
-                    update_post_meta($attachment_id, '_wp_attachment_image_alt', wp_kses_post($alt_text)); // Sanitize alt text
+                    // Atualiza o meta da imagem
+                    update_post_meta($attachment_id, '_wp_attachment_image_alt', wp_kses_post($alt_text));
                     $updated_count++;
+                    
+                    // Agora vamos procurar posts que usam esta imagem e atualizar o alt text
+                    $updated_posts = fu_update_posts_with_image($attachment_id, $image_url, $alt_text);
+                    $posts_updated += $updated_posts;
                 } else {
                     $errors[] = sprintf(__('Linha %d: URL encontrada (%s), mas não é um anexo da biblioteca de mídia.', FU_TEXT_DOMAIN), $row_number, esc_url($image_url));
                     $not_found_count++;
@@ -237,6 +244,15 @@ function fu_handle_alt_text_upload() {
                 FU_TEXT_DOMAIN
             )) . ' ',
             $updated_count
+        );
+        printf(
+            esc_html(_n(
+                '%d post atualizado com o novo texto alt.',
+                '%d posts atualizados com o novo texto alt.',
+                $posts_updated,
+                FU_TEXT_DOMAIN
+            )) . ' ',
+            $posts_updated
         );
         printf(
              esc_html(_n(
@@ -270,6 +286,118 @@ function fu_handle_alt_text_upload() {
         echo '<div class="notice notice-error is-dismissible"><p>' . esc_html__('Não foi possível abrir o arquivo CSV para leitura.', FU_TEXT_DOMAIN) . '</p></div>';
     }
     @unlink($file_path);
+}
+
+/**
+ * Atualiza o texto alt nos posts que contêm a imagem especificada
+ * 
+ * @param int    $attachment_id ID da imagem na biblioteca de mídia
+ * @param string $image_url     URL da imagem
+ * @param string $alt_text      Novo texto alternativo
+ * @return int   Número de posts atualizados
+ */
+function fu_update_posts_with_image($attachment_id, $image_url, $alt_text) {
+    global $wpdb;
+    $count = 0;
+    
+    // Obtém informações sobre a imagem para busca mais precisa
+    $attachment = get_post($attachment_id);
+    if (!$attachment) return 0;
+    
+    $filename = basename($image_url);
+    
+    // Busca diferentes variações da URL da imagem que podem aparecer nos posts
+    $possible_urls = [];
+    
+    // URL original
+    $possible_urls[] = $image_url;
+    
+    // URL sem protocolo (http://, https://)
+    $possible_urls[] = preg_replace('|^https?://|', '//', $image_url);
+    
+    // URL relativa ao domínio
+    $site_url = site_url();
+    $relative_url = str_replace($site_url, '', $image_url);
+    if ($relative_url !== $image_url) {
+        $possible_urls[] = $relative_url;
+    }
+    
+    // Apenas o nome do arquivo (para casos com srcset)
+    $possible_urls[] = $filename;
+    
+    // Busca todos os posts que podem conter esta imagem
+    $posts = $wpdb->get_results(
+        $wpdb->prepare(
+            "SELECT ID, post_content FROM {$wpdb->posts} 
+            WHERE post_status = 'publish' 
+            AND (post_type = 'post' OR post_type = 'page')
+            AND (post_content LIKE %s OR post_content LIKE %s)",
+            '%' . $wpdb->esc_like($filename) . '%',
+            '%' . $wpdb->esc_like('wp-image-' . $attachment_id) . '%'
+        )
+    );
+    
+    if (!$posts) return 0;
+    
+    foreach ($posts as $post) {
+        $content = $post->post_content;
+        $new_content = $content;
+        $updated = false;
+        
+        // Substitui o atributo alt em imagens que correspondem aos padrões identificados
+        foreach ($possible_urls as $url) {
+            // Padrão para encontrar imagens que contêm esta URL específica
+            $pattern = '/<img[^>]*' . preg_quote($url, '/') . '[^>]*>/i';
+            
+            if (preg_match_all($pattern, $content, $matches)) {
+                foreach ($matches[0] as $img_tag) {
+                    // Substitui ou adiciona o atributo alt
+                    $new_img_tag = preg_replace('/alt=(["\'])[^"\']*\1/i', 'alt="' . esc_attr($alt_text) . '"', $img_tag);
+                    
+                    // Se não tinha alt, adiciona um
+                    if ($new_img_tag === $img_tag && !preg_match('/alt=/i', $img_tag)) {
+                        $new_img_tag = str_replace('<img ', '<img alt="' . esc_attr($alt_text) . '" ', $img_tag);
+                    }
+                    
+                    if ($new_img_tag !== $img_tag) {
+                        $new_content = str_replace($img_tag, $new_img_tag, $new_content);
+                        $updated = true;
+                    }
+                }
+            }
+        }
+        
+        // Padrão adicional para classe wp-image-ID
+        $pattern = '/<img[^>]*class=["\'][^"\']*wp-image-' . $attachment_id . '[^"\']*["\'][^>]*>/i';
+        
+        if (preg_match_all($pattern, $content, $matches)) {
+            foreach ($matches[0] as $img_tag) {
+                // Substitui ou adiciona o atributo alt
+                $new_img_tag = preg_replace('/alt=(["\'])[^"\']*\1/i', 'alt="' . esc_attr($alt_text) . '"', $img_tag);
+                
+                // Se não tinha alt, adiciona um
+                if ($new_img_tag === $img_tag && !preg_match('/alt=/i', $img_tag)) {
+                    $new_img_tag = str_replace('<img ', '<img alt="' . esc_attr($alt_text) . '" ', $img_tag);
+                }
+                
+                if ($new_img_tag !== $img_tag) {
+                    $new_content = str_replace($img_tag, $new_img_tag, $new_content);
+                    $updated = true;
+                }
+            }
+        }
+        
+        // Atualiza o post se houver mudanças
+        if ($updated && $new_content !== $content) {
+            wp_update_post([
+                'ID' => $post->ID,
+                'post_content' => $new_content
+            ]);
+            $count++;
+        }
+    }
+    
+    return $count;
 }
 
 function fu_handle_serp_upload() {
@@ -393,5 +521,4 @@ function fu_handle_serp_upload() {
     }
      @unlink($file_path);
 }
-
 ?>
