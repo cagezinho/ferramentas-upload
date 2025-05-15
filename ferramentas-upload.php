@@ -2,8 +2,8 @@
 /**
  * Plugin Name:       Ferramentas Upload
  * Plugin URI:        https://github.com/cagezinho/ferramentas-upload
- * Description:       Permite atualizações massivas via CSV: Texto Alternativo (Alt Text) de Imagens e SERPs utilizando o Yoast.
- * Version:           1.0.2
+ * Description:       Permite atualizações massivas via CSV: Texto Alternativo (Alt Text) de Imagens e SERPs utilizando o Yoast. Inclui exportação de posts com categorias.
+ * Version:           1.1.2
  * Author:            Cage
  * Author URI:        https://github.com/cagezinho
  * License:           GPL v2 or later
@@ -19,16 +19,42 @@ if (!defined('ABSPATH')) {
 define('FU_PREFIX', 'fu_');
 define('FU_TEXT_DOMAIN', 'ferramentas-upload');
 define('FU_PAGE_SLUG', 'ferramentas-upload-main');
+
 define('FU_ALT_NONCE_ACTION', FU_PREFIX . 'alt_text_nonce_action');
 define('FU_ALT_NONCE_FIELD', FU_PREFIX . 'alt_text_nonce_field');
 define('FU_SERP_NONCE_ACTION', FU_PREFIX . 'serp_nonce_action');
 define('FU_SERP_NONCE_FIELD', FU_PREFIX . 'serp_nonce_field');
+define('FU_EXPORT_POSTS_NONCE_ACTION', FU_PREFIX . 'export_posts_nonce_action');
+define('FU_EXPORT_POSTS_NONCE_FIELD', FU_PREFIX . 'export_posts_nonce_field');
 
 add_action('admin_menu', FU_PREFIX . 'add_admin_menu');
 add_action('plugins_loaded', FU_PREFIX . 'load_textdomain');
+add_action('admin_init', FU_PREFIX . 'process_admin_actions'); // Hook para processar ações cedo
 
 function fu_load_textdomain() {
     load_plugin_textdomain(FU_TEXT_DOMAIN, false, dirname(plugin_basename(__FILE__)) . '/languages');
+}
+
+/**
+ * Processa ações submetidas via POST que precisam modificar cabeçalhos (como downloads).
+ * Esta função é hookada em 'admin_init' para ser executada antes de qualquer saída.
+ */
+function fu_process_admin_actions() {
+    // Verifica se estamos na página do plugin e se uma ação foi submetida
+    if (isset($_GET['page']) && $_GET['page'] === FU_PAGE_SLUG && isset($_POST[FU_PREFIX . 'action'])) {
+        $action = sanitize_key($_POST[FU_PREFIX . 'action']);
+
+        if ($action === 'export_posts_categories' && isset($_POST[FU_EXPORT_POSTS_NONCE_FIELD])) {
+            // Verificar nonce e permissões antes de chamar o handler
+            check_admin_referer(FU_EXPORT_POSTS_NONCE_ACTION, FU_EXPORT_POSTS_NONCE_FIELD);
+            if (current_user_can('manage_options')) {
+                fu_handle_export_posts_categories(); // Esta função chama exit()
+            } else {
+                wp_die(__('Você não tem permissão para realizar esta ação.', FU_TEXT_DOMAIN));
+            }
+        }
+        // Outras ações que modificam cabeçalhos (ex: redirecionamentos) também viriam aqui.
+    }
 }
 
 function fu_add_admin_menu() {
@@ -48,6 +74,7 @@ function fu_render_admin_page() {
         wp_die(__('Você não tem permissão para acessar esta página.', FU_TEXT_DOMAIN));
     }
 
+    // Processar ações que exibem mensagens na página (não modificam cabeçalhos de download)
     if (isset($_POST[FU_PREFIX . 'action'])) {
         $action = sanitize_key($_POST[FU_PREFIX . 'action']);
         if ($action === 'update_alt_text' && isset($_POST[FU_ALT_NONCE_FIELD])) {
@@ -57,6 +84,7 @@ function fu_render_admin_page() {
              check_admin_referer(FU_SERP_NONCE_ACTION, FU_SERP_NONCE_FIELD);
              fu_handle_serp_upload();
         }
+        // A ação 'export_posts_categories' agora é tratada em fu_process_admin_actions via 'admin_init'
     }
 
     $active_tab = isset($_GET['tab']) ? sanitize_key($_GET['tab']) : 'alt_text';
@@ -71,6 +99,9 @@ function fu_render_admin_page() {
             <a href="?page=<?php echo esc_attr(FU_PAGE_SLUG); ?>&tab=serp" class="nav-tab <?php echo $active_tab == 'serp' ? 'nav-tab-active' : ''; ?>">
                  <?php esc_html_e('Atualizar SERP Yoast', FU_TEXT_DOMAIN); ?>
             </a>
+            <a href="?page=<?php echo esc_attr(FU_PAGE_SLUG); ?>&tab=export_posts" class="nav-tab <?php echo $active_tab == 'export_posts' ? 'nav-tab-active' : ''; ?>">
+                 <?php esc_html_e('Exportar Posts e Categorias', FU_TEXT_DOMAIN); ?>
+            </a>
         </h2>
 
         <?php if ($active_tab == 'alt_text') : ?>
@@ -81,7 +112,7 @@ function fu_render_admin_page() {
                  <p><strong><?php esc_html_e('Importante:', FU_TEXT_DOMAIN); ?></strong> <?php esc_html_e('Use a URL completa da imagem como ela aparece na Biblioteca de Mídia.', FU_TEXT_DOMAIN); ?></p>
                  <p><?php esc_html_e('Este processo irá atualizar o texto alt da imagem e também em todos os posts/páginas onde a imagem é usada.', FU_TEXT_DOMAIN); ?></p>
 
-                 <form method="post" enctype="multipart/form-data">
+                 <form method="post" enctype="multipart/form-data" action="?page=<?php echo esc_attr(FU_PAGE_SLUG); ?>&tab=alt_text">
                      <input type="hidden" name="<?php echo esc_attr(FU_PREFIX . 'action'); ?>" value="update_alt_text">
                      <?php wp_nonce_field(FU_ALT_NONCE_ACTION, FU_ALT_NONCE_FIELD); ?>
                      <table class="form-table">
@@ -119,7 +150,7 @@ function fu_render_admin_page() {
                      <p><strong><?php esc_html_e('Importante:', FU_TEXT_DOMAIN); ?></strong> <?php esc_html_e('A primeira linha do CSV será ignorada (cabeçalho).', FU_TEXT_DOMAIN); ?></p>
                      <p><strong><?php esc_html_e('Atenção:', FU_TEXT_DOMAIN); ?></strong> <?php esc_html_e('Faça um backup do seu banco de dados antes de executar atualizações em massa.', FU_TEXT_DOMAIN); ?></p>
 
-                     <form method="post" enctype="multipart/form-data">
+                     <form method="post" enctype="multipart/form-data" action="?page=<?php echo esc_attr(FU_PAGE_SLUG); ?>&tab=serp">
                          <input type="hidden" name="<?php echo esc_attr(FU_PREFIX . 'action'); ?>" value="update_serp">
                          <?php wp_nonce_field(FU_SERP_NONCE_ACTION, FU_SERP_NONCE_FIELD); ?>
                          <table class="form-table">
@@ -138,6 +169,19 @@ function fu_render_admin_page() {
                      <?php
                  }
                  ?>
+            </div>
+        <?php elseif ($active_tab == 'export_posts') : ?>
+            <div id="export-posts-categories" class="tab-content">
+                <h3><?php esc_html_e('Exportar Posts com Categorias para CSV', FU_TEXT_DOMAIN); ?></h3>
+                <p><?php esc_html_e('Clique no botão abaixo para exportar um arquivo CSV contendo todos os posts publicados, seus IDs, URLs e as categorias associadas.', FU_TEXT_DOMAIN); ?></p>
+                <p><?php esc_html_e('As colunas no CSV serão:', FU_TEXT_DOMAIN); ?> <strong><?php esc_html_e('ID do Post', FU_TEXT_DOMAIN); ?></strong>, <strong><?php esc_html_e('Título do Post', FU_TEXT_DOMAIN); ?></strong>, <strong><?php esc_html_e('URL do Post', FU_TEXT_DOMAIN); ?></strong>, <strong><?php esc_html_e('Categorias', FU_TEXT_DOMAIN); ?></strong>.</p>
+                <p><?php esc_html_e('Se um post tiver múltiplas categorias, elas serão listadas na mesma célula, separadas por vírgula.', FU_TEXT_DOMAIN); ?></p>
+
+                <form method="post" action="?page=<?php echo esc_attr(FU_PAGE_SLUG); ?>&tab=export_posts">
+                    <input type="hidden" name="<?php echo esc_attr(FU_PREFIX . 'action'); ?>" value="export_posts_categories">
+                    <?php wp_nonce_field(FU_EXPORT_POSTS_NONCE_ACTION, FU_EXPORT_POSTS_NONCE_FIELD); ?>
+                    <?php submit_button(__('Exportar Posts para CSV', FU_TEXT_DOMAIN), 'primary', 'fu_submit_export_posts'); ?>
+                </form>
             </div>
         <?php endif; ?>
     </div>
@@ -173,7 +217,7 @@ function fu_handle_alt_text_upload() {
     $updated_count = 0;
     $skipped_count = 0;
     $not_found_count = 0;
-    $posts_updated = 0;
+    $posts_updated_count = 0; // Renomeado para clareza
     $errors = [];
     $row_number = 0;
 
@@ -181,7 +225,7 @@ function fu_handle_alt_text_upload() {
 
     if (($handle = fopen($file_path, 'r')) !== FALSE) {
 
-        fgetcsv($handle, 0, ",");
+        fgetcsv($handle, 0, ","); // Pula cabeçalho
         $row_number++;
 
         while (($data = fgetcsv($handle, 0, ",")) !== FALSE) {
@@ -194,7 +238,7 @@ function fu_handle_alt_text_upload() {
                      if ($detected_encoding && $detected_encoding !== 'UTF-8') {
                          return mb_convert_encoding($item, 'UTF-8', $detected_encoding);
                      }
-                     return $item; // Assume UTF-8 or return as is if detection fails
+                     return $item;
                  }, $data);
              }
 
@@ -222,8 +266,8 @@ function fu_handle_alt_text_upload() {
                     $updated_count++;
                     
                     // Agora vamos procurar posts que usam esta imagem e atualizar o alt text
-                    $updated_posts = fu_update_posts_with_image($attachment_id, $image_url, $alt_text);
-                    $posts_updated += $updated_posts;
+                    $updated_posts_for_this_image = fu_update_posts_with_image($attachment_id, $image_url, $alt_text);
+                    $posts_updated_count += $updated_posts_for_this_image;
                 } else {
                     $errors[] = sprintf(__('Linha %d: URL encontrada (%s), mas não é um anexo da biblioteca de mídia.', FU_TEXT_DOMAIN), $row_number, esc_url($image_url));
                     $not_found_count++;
@@ -238,8 +282,8 @@ function fu_handle_alt_text_upload() {
         echo '<div class="notice notice-success is-dismissible"><p>';
         printf(
             esc_html(_n(
-                'Processamento concluído! %d imagem atualizada.',
-                'Processamento concluído! %d imagens atualizadas.',
+                'Processamento concluído! %d imagem atualizada na biblioteca.', // Mais específico
+                'Processamento concluído! %d imagens atualizadas na biblioteca.',
                 $updated_count,
                 FU_TEXT_DOMAIN
             )) . ' ',
@@ -247,12 +291,12 @@ function fu_handle_alt_text_upload() {
         );
         printf(
             esc_html(_n(
-                '%d post atualizado com o novo texto alt.',
-                '%d posts atualizados com o novo texto alt.',
-                $posts_updated,
+                '%d instância de imagem atualizada em posts/páginas.', // Mais específico
+                '%d instâncias de imagens atualizadas em posts/páginas.',
+                $posts_updated_count,
                 FU_TEXT_DOMAIN
             )) . ' ',
-            $posts_updated
+            $posts_updated_count
         );
         printf(
              esc_html(_n(
@@ -277,7 +321,7 @@ function fu_handle_alt_text_upload() {
         if (!empty($errors)) {
             echo '<div class="notice notice-warning is-dismissible"><p><strong>' . esc_html__('Detalhes dos erros/avisos encontrados:', FU_TEXT_DOMAIN) . '</strong></p><ul>';
             foreach ($errors as $error) {
-                echo '<li>' . wp_kses_post($error) . '</li>'; // Use wp_kses_post for safer output
+                echo '<li>' . wp_kses_post($error) . '</li>';
             }
             echo '</ul></div>';
         }
@@ -285,7 +329,9 @@ function fu_handle_alt_text_upload() {
     } else {
         echo '<div class="notice notice-error is-dismissible"><p>' . esc_html__('Não foi possível abrir o arquivo CSV para leitura.', FU_TEXT_DOMAIN) . '</p></div>';
     }
-    @unlink($file_path);
+    if (isset($file_path) && file_exists($file_path)) {
+        @unlink($file_path);
+    }
 }
 
 /**
@@ -294,109 +340,114 @@ function fu_handle_alt_text_upload() {
  * @param int    $attachment_id ID da imagem na biblioteca de mídia
  * @param string $image_url     URL da imagem
  * @param string $alt_text      Novo texto alternativo
- * @return int   Número de posts atualizados
+ * @return int   Número de instâncias de imagem atualizadas nos posts
  */
 function fu_update_posts_with_image($attachment_id, $image_url, $alt_text) {
     global $wpdb;
     $count = 0;
     
-    // Obtém informações sobre a imagem para busca mais precisa
     $attachment = get_post($attachment_id);
     if (!$attachment) return 0;
     
     $filename = basename($image_url);
     
-    // Busca diferentes variações da URL da imagem que podem aparecer nos posts
-    $possible_urls = [];
+    $posts_query_args = [
+        'post_type'      => ['post', 'page'],
+        'post_status'    => 'publish',
+        'posts_per_page' => -1,
+        's'              => $filename, // Busca inicial pelo nome do arquivo
+        'meta_query'     => [ // Otimização: buscar apenas posts que *poderiam* conter a imagem
+            [
+                'key'     => '_thumbnail_id',
+                'value'   => $attachment_id,
+                'compare' => '=',
+            ],
+            // Ou, para imagens no conteúdo (esta parte é mais difícil de otimizar com meta_query diretamente)
+            // A busca com 's' já ajuda bastante.
+        ],
+        'fields' => 'ids' // Apenas IDs para otimizar a query inicial
+    ];
+    // Uma busca mais ampla se a imagem não for thumbnail, removendo o meta_query específico
+    $ids_thumbnail = get_posts($posts_query_args);
+
+    $posts_query_args_content_search = [
+        'post_type'      => ['post', 'page'],
+        'post_status'    => 'publish',
+        'posts_per_page' => -1,
+        's'              => $filename,
+        'fields'         => 'ids'
+    ];
+    $ids_content = get_posts($posts_query_args_content_search);
+
+    // Unir e remover duplicatas
+    $post_ids_to_check = array_unique(array_merge($ids_thumbnail, $ids_content));
+
+
+    if (empty($post_ids_to_check)) return 0;
     
-    // URL original
-    $possible_urls[] = $image_url;
-    
-    // URL sem protocolo (http://, https://)
-    $possible_urls[] = preg_replace('|^https?://|', '//', $image_url);
-    
-    // URL relativa ao domínio
-    $site_url = site_url();
-    $relative_url = str_replace($site_url, '', $image_url);
-    if ($relative_url !== $image_url) {
-        $possible_urls[] = $relative_url;
-    }
-    
-    // Apenas o nome do arquivo (para casos com srcset)
-    $possible_urls[] = $filename;
-    
-    // Busca todos os posts que podem conter esta imagem
-    $posts = $wpdb->get_results(
-        $wpdb->prepare(
-            "SELECT ID, post_content FROM {$wpdb->posts} 
-            WHERE post_status = 'publish' 
-            AND (post_type = 'post' OR post_type = 'page')
-            AND (post_content LIKE %s OR post_content LIKE %s)",
-            '%' . $wpdb->esc_like($filename) . '%',
-            '%' . $wpdb->esc_like('wp-image-' . $attachment_id) . '%'
-        )
-    );
-    
-    if (!$posts) return 0;
-    
-    foreach ($posts as $post) {
-        $content = $post->post_content;
+    foreach ($post_ids_to_check as $post_id) {
+        $content = get_post_field('post_content', $post_id);
         $new_content = $content;
-        $updated = false;
+        $updated_in_this_post = false;
         
-        // Substitui o atributo alt em imagens que correspondem aos padrões identificados
-        foreach ($possible_urls as $url) {
-            // Padrão para encontrar imagens que contêm esta URL específica
-            $pattern = '/<img[^>]*' . preg_quote($url, '/') . '[^>]*>/i';
-            
-            if (preg_match_all($pattern, $content, $matches)) {
-                foreach ($matches[0] as $img_tag) {
-                    // Substitui ou adiciona o atributo alt
-                    $new_img_tag = preg_replace('/alt=(["\'])[^"\']*\1/i', 'alt="' . esc_attr($alt_text) . '"', $img_tag);
-                    
-                    // Se não tinha alt, adiciona um
-                    if ($new_img_tag === $img_tag && !preg_match('/alt=/i', $img_tag)) {
-                        $new_img_tag = str_replace('<img ', '<img alt="' . esc_attr($alt_text) . '" ', $img_tag);
-                    }
-                    
-                    if ($new_img_tag !== $img_tag) {
-                        $new_content = str_replace($img_tag, $new_img_tag, $new_content);
-                        $updated = true;
-                    }
-                }
-            }
-        }
-        
-        // Padrão adicional para classe wp-image-ID
-        $pattern = '/<img[^>]*class=["\'][^"\']*wp-image-' . $attachment_id . '[^"\']*["\'][^>]*>/i';
-        
-        if (preg_match_all($pattern, $content, $matches)) {
-            foreach ($matches[0] as $img_tag) {
+        // Padrão para encontrar a classe wp-image-ID, que é o mais confiável
+        $pattern_wp_class = '/<img[^>]*class=(["\'])(?:[^"\']*\s)?wp-image-' . intval($attachment_id) . '(?:\s[^"\']*)?\1[^>]*>/i';
+
+        if (preg_match_all($pattern_wp_class, $content, $matches_wp_class)) {
+            foreach ($matches_wp_class[0] as $img_tag) {
+                $original_img_tag = $img_tag;
                 // Substitui ou adiciona o atributo alt
-                $new_img_tag = preg_replace('/alt=(["\'])[^"\']*\1/i', 'alt="' . esc_attr($alt_text) . '"', $img_tag);
-                
-                // Se não tinha alt, adiciona um
-                if ($new_img_tag === $img_tag && !preg_match('/alt=/i', $img_tag)) {
-                    $new_img_tag = str_replace('<img ', '<img alt="' . esc_attr($alt_text) . '" ', $img_tag);
+                if (preg_match('/alt=/i', $img_tag)) {
+                    $img_tag = preg_replace('/alt=(["\'])(?:[^"\']*)?\1/i', 'alt="' . esc_attr($alt_text) . '"', $img_tag, 1);
+                } else {
+                    $img_tag = str_replace('<img ', '<img alt="' . esc_attr($alt_text) . '" ', $img_tag);
                 }
                 
-                if ($new_img_tag !== $img_tag) {
-                    $new_content = str_replace($img_tag, $new_img_tag, $new_content);
-                    $updated = true;
+                if ($img_tag !== $original_img_tag) {
+                    $new_content = str_replace($original_img_tag, $img_tag, $new_content);
+                    $updated_in_this_post = true;
+                    $count++; // Conta cada tag <img> atualizada
                 }
             }
         }
         
-        // Atualiza o post se houver mudanças
-        if ($updated && $new_content !== $content) {
+        // Fallback: procurar pela URL da imagem se não encontrou pela classe (menos preciso)
+        // Só faz sentido se a imagem não foi atualizada pela classe wp-image-ID
+        // E se a imagem tem uma URL (alguns blocos podem não ter URL explícita no content)
+        if (strpos($new_content, 'wp-image-' . intval($attachment_id)) === false && !empty($image_url)) {
+            $escaped_image_url = preg_quote($image_url, '/');
+            // Tenta encontrar <img ... src="...{image_url}..." ...>
+            $pattern_url = '/<img[^>]*src=(["\'])(?:[^"\']*?)' . $escaped_image_url . '(?:[^"\']*?)\1[^>]*>/i';
+            if (preg_match_all($pattern_url, $content, $matches_url)) { // Usar $content original para a busca
+                 foreach ($matches_url[0] as $img_tag) {
+                    // Verifica se esta tag já foi processada (improvável se chegou aqui, mas como segurança)
+                    if (strpos($new_content, $img_tag) === false && $updated_in_this_post) continue;
+
+                    $original_img_tag = $img_tag;
+                    if (preg_match('/alt=/i', $img_tag)) {
+                        $img_tag = preg_replace('/alt=(["\'])(?:[^"\']*)?\1/i', 'alt="' . esc_attr($alt_text) . '"', $img_tag, 1);
+                    } else {
+                        $img_tag = str_replace('<img ', '<img alt="' . esc_attr($alt_text) . '" ', $img_tag);
+                    }
+
+                    if ($img_tag !== $original_img_tag) {
+                        $new_content = str_replace($original_img_tag, $img_tag, $new_content);
+                        $updated_in_this_post = true;
+                        $count++;
+                    }
+                }
+            }
+        }
+
+        if ($updated_in_this_post && $new_content !== $content) {
             wp_update_post([
-                'ID' => $post->ID,
+                'ID' => $post_id,
                 'post_content' => $new_content
             ]);
-            $count++;
+            // Não incrementamos $count aqui, pois já contamos cada tag <img>.
+            // Se quiser contar posts, seria aqui.
         }
     }
-    
     return $count;
 }
 
@@ -433,7 +484,7 @@ function fu_handle_serp_upload() {
         while (($data = fgetcsv($handle, 0, ',')) !== FALSE) {
             $row_num++;
 
-            if ($row_num == 1) {
+            if ($row_num == 1) { // Pula cabeçalho
                 continue;
             }
 
@@ -454,8 +505,8 @@ function fu_handle_serp_upload() {
             }
 
             $url         = isset($data[0]) ? trim($data[0]) : '';
-            $new_title   = isset($data[1]) ? trim($data[1]) : null;
-            $new_desc    = isset($data[2]) ? trim($data[2]) : null;
+            $new_title   = isset($data[1]) ? trim($data[1]) : null; // Permitir nulo para limpar
+            $new_desc    = isset($data[2]) ? trim($data[2]) : null; // Permitir nulo para limpar
 
             if (empty($url) || !filter_var($url, FILTER_VALIDATE_URL)) {
                  $error_log[] = sprintf(__('Linha %d: URL inválida ou vazia (\'%s\'). Linha ignorada.', FU_TEXT_DOMAIN), $row_num, esc_html($url));
@@ -465,25 +516,28 @@ function fu_handle_serp_upload() {
             $post_id = url_to_postid($url);
 
             if ($post_id > 0) {
-
                 $yoast_title_key = '_yoast_wpseo_title';
                 $yoast_desc_key = '_yoast_wpseo_metadesc';
-                $updated = false;
+                $updated_meta = false;
 
+                // Se o novo título for uma string vazia, significa que queremos que o Yoast gere automaticamente
+                // ou que o usuário deixou em branco no CSV para indicar isso.
+                // Se for null, não fazemos nada (mantém o valor atual).
                 if ($new_title !== null) {
                     update_post_meta($post_id, $yoast_title_key, sanitize_text_field($new_title));
-                    $updated = true;
+                    $updated_meta = true;
                 }
 
                 if ($new_desc !== null) {
                     update_post_meta($post_id, $yoast_desc_key, sanitize_textarea_field($new_desc));
-                     $updated = true;
+                    $updated_meta = true;
                 }
 
-                if($updated) {
+                if($updated_meta) {
                     $success_count++;
                 } else {
-                     $warning_log[] = sprintf(__('Linha %d: URL \'%s\' (ID: %d) encontrada, mas nenhum título ou descrição foi fornecido para atualização.', FU_TEXT_DOMAIN), $row_num, esc_url($url), $post_id);
+                     // Isso agora significa que os campos no CSV estavam vazios E eram nulos (ou não presentes)
+                     $warning_log[] = sprintf(__('Linha %d: URL \'%s\' (ID: %d) encontrada, mas nenhum título ou descrição foi fornecido para atualização no CSV.', FU_TEXT_DOMAIN), $row_num, esc_url($url), $post_id);
                 }
 
             } else {
@@ -519,6 +573,84 @@ function fu_handle_serp_upload() {
     } else {
         echo '<div class="notice notice-error is-dismissible"><p>' . esc_html__('Não foi possível abrir o arquivo CSV para leitura.', FU_TEXT_DOMAIN) . '</p></div>';
     }
-     @unlink($file_path);
+    if (isset($file_path) && file_exists($file_path)) {
+         @unlink($file_path);
+    }
+}
+
+/**
+ * Nova função para manipular a exportação de posts e categorias.
+ */
+function fu_handle_export_posts_categories() {
+    // A verificação de nonce e permissões já foi feita em fu_process_admin_actions
+
+    // Definir o nome do arquivo CSV
+    $filename = 'posts_com_categorias-' . date('Y-m-d_H-i-s') . '.csv';
+
+    // Configurar cabeçalhos HTTP para download
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename="' . $filename . '"');
+    header('Pragma: no-cache'); // Adicionado
+    header('Expires: 0'); // Adicionado
+
+    // Abrir o stream de saída
+    $output = fopen('php://output', 'w');
+    
+    // Adicionar BOM para melhor compatibilidade com Excel em UTF-8
+    fwrite($output, "\xEF\xBB\xBF");
+
+    // Definir o cabeçalho do CSV
+    fputcsv($output, [
+        __('ID do Post', FU_TEXT_DOMAIN),
+        __('Título do Post', FU_TEXT_DOMAIN),
+        __('URL do Post', FU_TEXT_DOMAIN),
+        __('Categorias', FU_TEXT_DOMAIN)
+    ]);
+
+    // Argumentos para buscar todos os posts publicados
+    $args = [
+        'post_type'      => 'post',
+        'post_status'    => 'publish',
+        'posts_per_page' => -1, // Obter todos os posts
+        'orderby'        => 'ID',
+        'order'          => 'ASC',
+        'no_found_rows'  => true, // Otimização, não precisamos de paginação
+        'update_post_meta_cache' => false, // Otimização
+        'update_post_term_cache' => false, // Otimização (get_the_category fará seu próprio cache)
+    ];
+
+    $posts_query = new WP_Query($args);
+
+    if ($posts_query->have_posts()) {
+        while ($posts_query->have_posts()) {
+            $posts_query->the_post();
+            $post_id = get_the_ID();
+            $post_title = get_the_title();
+            $post_url = get_permalink();
+
+            $categories = get_the_category($post_id);
+            $category_names = [];
+            if (!empty($categories)) {
+                foreach ($categories as $category) {
+                    $category_names[] = $category->name;
+                }
+            }
+            // Juntar nomes das categorias com vírgula e espaço
+            $categories_string = implode(', ', $category_names);
+
+            // Escrever a linha no CSV
+            fputcsv($output, [
+                $post_id,
+                $post_title,
+                $post_url,
+                $categories_string
+            ]);
+        }
+        wp_reset_postdata();
+    }
+
+    // Fechar o stream e sair
+    fclose($output);
+    exit;
 }
 ?>
